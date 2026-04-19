@@ -700,6 +700,52 @@ async def list_models():
     """
     return model_manager.get_status()
 
+
+# OpenAI-compatible endpoint for AnythingLLM, Open WebUI, etc.
+class OpenAIEmbedRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    input: Any = Field(..., description="String or list of strings to embed")
+    model: Optional[str] = Field(default=None)
+    encoding_format: Optional[str] = Field(default="float")
+
+@app.post("/v1/embeddings", tags=["OpenAI"])
+async def openai_embeddings(request: OpenAIEmbedRequest):
+    import base64
+    texts = request.input if isinstance(request.input, list) else [request.input]
+    start = time.time()
+    embeddings, model_used, dim = await model_manager.generate_embeddings(
+        texts, model_name=request.model, normalize=True
+    )
+    total_tokens = sum(len(t.split()) for t in texts)
+    # OpenAI node SDK 4.x defaults to encoding_format="base64" for performance.
+    # When base64 is requested, the embedding field must be a base64-encoded
+    # little-endian float32 bytestring, which the SDK decodes client-side.
+    use_base64 = (request.encoding_format or "float").lower() == "base64"
+    def encode_one(emb):
+        if use_base64:
+            return base64.b64encode(emb.astype(np.float32).tobytes()).decode("ascii")
+        return emb.tolist()
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "index": i, "embedding": encode_one(emb)}
+            for i, emb in enumerate(embeddings)
+        ],
+        "model": model_used,
+        "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens}
+    }
+
+@app.get("/v1/models", tags=["OpenAI"])
+async def openai_models():
+    status_obj = model_manager.get_status()
+    return {
+        "object": "list",
+        "data": [
+            {"id": name, "object": "model", "created": 0, "owned_by": "mlx-community"}
+            for name in AVAILABLE_MODELS.keys()
+        ]
+    }
+
 # Error handlers
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
